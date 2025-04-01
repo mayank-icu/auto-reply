@@ -3,9 +3,8 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const bodyParser = require('body-parser');
-const { HfInference } = require('@huggingface/inference');
 
-// Use a simple JSON file for storage instead of Firebase to avoid auth issues
+// Use a simple JSON file for storage
 const fs = require('fs');
 const path = require('path');
 const dataPath = path.join(__dirname, 'data');
@@ -23,19 +22,16 @@ if (!fs.existsSync(usersPath)) {
 const app = express();
 app.use(bodyParser.json());
 
-// Initialize Hugging Face
-const hf = new HfInference(process.env.HUGGINGFACE_TOKEN);
-
-// Personal details to help the AI respond like you
+// Personal details to make responses feel more human
 const personalDetails = {
-  name: "Your Name",
-  age: 25,
-  interests: ["photography", "travel", "fitness", "cooking"],
-  personality: "friendly, witty, slightly sarcastic but kind",
-  commonPhrases: ["lol", "haha", "definitely", "for sure", "that's awesome"],
+  name: "Alex",
+  age: 27,
+  interests: ["photography", "hiking", "music festivals", "cooking", "travel"],
+  personality: "friendly, witty, slightly flirty but respectful",
+  commonPhrases: ["haha", "so tell me more about you", "that's interesting", "I was just thinking about that", "we should talk more often"],
   typingHabits: {
     usesEmojis: true,
-    frequentEmojis: ["😂", "👍", "❤️", "🔥", "🙌"],
+    frequentEmojis: ["😊", "😉", "😂", "👋", "✨", "🙌", "💕", "🔥"],
     punctuation: "relaxed",
     capitalization: "inconsistent"
   }
@@ -82,7 +78,7 @@ app.post('/webhook', async (req, res) => {
   console.log('Received webhook event:', JSON.stringify(req.body));
   const data = req.body;
 
-  // Make sure this is a page webhook
+  // Make sure this is an Instagram webhook
   if (data.object === 'instagram') {
     for (const entry of data.entry) {
       // Check if there's messaging in the entry
@@ -123,11 +119,11 @@ async function processMessage(senderId, messageText) {
     // Update conversation history
     await updateConversationHistory(senderId, 'user', messageText, userProfile);
     
-    // Generate AI response
-    const aiResponse = await generateAIResponse(senderId, messageText, userProfile);
+    // Generate response (without relying on external AI API initially)
+    const response = generateBackupResponse(messageText, userProfile);
     
     // Humanize the response
-    const humanizedResponse = humanizeResponse(aiResponse, userProfile);
+    const humanizedResponse = humanizeResponse(response, userProfile);
     
     console.log(`Generated response: ${humanizedResponse}`);
     
@@ -145,6 +141,13 @@ async function processMessage(senderId, messageText) {
   } catch (error) {
     console.error(`Error in processMessage: ${error.message}`);
     console.error(error.stack);
+    
+    // Attempt to send a fallback message if there was an error
+    try {
+      await sendInstagramMessage(senderId, "Hey there! Having some internet issues... can you give me a minute? 😊");
+    } catch (sendError) {
+      console.error('Error sending fallback message:', sendError);
+    }
   }
 }
 
@@ -158,46 +161,21 @@ async function getUserProfile(senderId) {
   } else {
     console.log(`Creating new user profile for ${senderId}`);
     
-    // Fetch user info from Instagram
-    const userInfo = await fetchInstagramUserInfo(senderId);
-    
-    // Create new user profile
+    // Don't try to fetch user info from Instagram as it's failing
+    // Instead create a basic profile
     const newProfile = {
       id: senderId,
-      name: userInfo.name || 'User',
+      name: 'Friend',  // Generic name since we can't fetch it
       conversationStyle: 'casual',
       topics: [],
       relationshipLevel: 'acquaintance',
       conversationHistory: [],
-      lastInteraction: new Date().toISOString()
+      lastInteraction: new Date().toISOString(),
+      responseCount: 0
     };
     
     saveUser(senderId, newProfile);
     return newProfile;
-  }
-}
-
-// Fetch user info from Instagram API
-async function fetchInstagramUserInfo(userId) {
-  try {
-    console.log(`Fetching Instagram user info for ${userId}`);
-    const response = await axios.get(
-      `${INSTAGRAM_BASE_URL}/${userId}`,
-      {
-        params: {
-          fields: 'name,profile_pic',
-          access_token: process.env.INSTAGRAM_ACCESS_TOKEN
-        }
-      }
-    );
-    console.log(`Retrieved user info:`, response.data);
-    return response.data;
-  } catch (error) {
-    console.error('Error fetching user info:', error.message);
-    if (error.response) {
-      console.error('Error response:', error.response.data);
-    }
-    return { name: 'User' };
   }
 }
 
@@ -217,87 +195,87 @@ async function updateConversationHistory(userId, sender, message, userProfile) {
     userProfile.conversationHistory = userProfile.conversationHistory.slice(-20);
   }
   
+  // Update last interaction timestamp
   userProfile.lastInteraction = new Date().toISOString();
+  
+  // Increment response count if this is a bot response
+  if (sender === 'bot') {
+    userProfile.responseCount = (userProfile.responseCount || 0) + 1;
+  }
   
   // Save updated profile
   saveUser(userId, userProfile);
 }
 
-// Generate AI response using Hugging Face
-async function generateAIResponse(userId, messageText, userProfile) {
-  console.log(`Generating AI response for ${userId}`);
+// Generate a backup response without using external AI APIs
+function generateBackupResponse(messageText, userProfile) {
+  console.log('Generating backup response');
+  const messageTextLower = messageText.toLowerCase();
+  const responseCount = userProfile.responseCount || 0;
   
-  // Get last 5 messages for context
-  const conversationHistory = userProfile.conversationHistory.slice(-10);
-  const formattedHistory = conversationHistory.map(msg => 
-    `${msg.sender === 'user' ? userProfile.name : 'You'}: ${msg.message}`
-  ).join('\n');
-  
-  // Check if message might be suspecting an AI
-  const suspicionKeywords = ['are you a bot', 'are you ai', 'is this automated', 'this sounds like ai'];
-  const mightBeSuspicious = suspicionKeywords.some(keyword => 
-    messageText.toLowerCase().includes(keyword)
-  );
-  
-  // Create prompt for the AI
-  let prompt = '';
-  
-  if (mightBeSuspicious) {
-    // Create a deflection prompt
-    prompt = `You are roleplaying as a human named ${personalDetails.name}. Someone just asked if you're an AI or bot. 
-    Respond in a casual, slightly confused way. Be humorous and natural. Never admit you're AI.
-    Your personality: ${personalDetails.personality}
-    Recent conversation:\n${formattedHistory}\n
-    Their message: ${messageText}\n
-    Your response (casual, confused, and humorous):`;
-  } else {
-    // Create a normal conversation prompt
-    prompt = `You are roleplaying as a human named ${personalDetails.name}. 
-    Age: ${personalDetails.age}
-    Interests: ${personalDetails.interests.join(', ')}
-    Personality: ${personalDetails.personality}
-    Common phrases you use: ${personalDetails.commonPhrases.join(', ')}
-    
-    You're having a conversation with ${userProfile.name}. Your relationship is: ${userProfile.relationshipLevel}.
-    Their conversation style is: ${userProfile.conversationStyle}.
-    
-    Recent conversation:\n${formattedHistory}\n
-    Their message: ${messageText}\n
-    
-    Your response (in your natural style, as a real human):`;
+  // First-time response
+  if (responseCount === 0) {
+    return "Hey there! 👋 So nice to hear from you! I was just scrolling through some travel photos. How's your day going? ✨";
   }
   
-  try {
-    console.log(`Sending prompt to Hugging Face: ${prompt.substring(0, 100)}...`);
-    
-    // Use Hugging Face for text generation
-    const response = await hf.textGeneration({
-      model: 'mistralai/Mistral-7B-Instruct-v0.2', // A good open model for chat
-      inputs: prompt,
-      parameters: {
-        max_new_tokens: 150,
-        temperature: 0.7,
-        top_p: 0.95,
-        do_sample: true
-      }
-    });
-    
-    // Extract and clean AI response
-    let aiResponse = response.generated_text;
-    
-    // Clean up the response
-    aiResponse = aiResponse.replace(/^Your response.*?:/i, '').trim();
-    aiResponse = aiResponse.replace(/^You:/i, '').trim();
-    
-    console.log(`AI response generated: ${aiResponse}`);
-    return aiResponse;
-  } catch (error) {
-    console.error('Error generating AI response:', error.message);
-    return "Hey! Sorry, I'm a bit busy right now. I'll get back to you soon! 😊";
+  // Greeting patterns
+  if (/^(hi|hello|hey|hola|sup|yo|hii|heya)/i.test(messageTextLower)) {
+    const greetings = [
+      "Heyyy there! 😊 Great to hear from you! What are you up to today?",
+      "Hi! I was just thinking about messaging you actually... How have you been? 💕",
+      "Hey you! 👋 So nice to see your message pop up. Tell me something good that happened today?",
+      "Well hello there! 😉 Perfect timing, I was just taking a break. How's life treating you?"
+    ];
+    return greetings[Math.floor(Math.random() * greetings.length)];
   }
+  
+  // Question detection
+  if (messageTextLower.includes("?") || /^(what|who|where|when|why|how|do you|are you|can you|will you)/i.test(messageTextLower)) {
+    const questionResponses = [
+      "Hmm, that's an interesting question... 🤔 I'd say it depends on what you're looking for. What do you think?",
+      "Oh I love talking about this! I actually have a few thoughts about that... but I'm curious to hear yours first? 😊",
+      "That's something I've been wondering about too! I've been leaning towards... wait, what's your take on it? ✨",
+      "Great question! I was discussing something similar with a friend yesterday. I think... Actually, let me hear your perspective first 💭"
+    ];
+    return questionResponses[Math.floor(Math.random() * questionResponses.length)];
+  }
+  
+  // If message mentions activities
+  const activities = ["work", "working", "job", "busy", "studying", "watching", "listening", "reading", "cooking", "gym", "exercise", "game", "playing"];
+  if (activities.some(activity => messageTextLower.includes(activity))) {
+    const activityResponses = [
+      "That sounds like a full day! I've been meaning to do more of that myself. How long have you been into it? 😊",
+      "Sounds fun! I actually love doing that too when I get some free time. Any tips for someone who's still getting the hang of it? 💕",
+      "Oh, I'm kinda jealous! I've been so busy lately and haven't had time for that. Tell me more about it? ✨",
+      "That's awesome! I'm planning to do something similar this weekend. Maybe you can give me some pointers? 😉"
+    ];
+    return activityResponses[Math.floor(Math.random() * activityResponses.length)];
+  }
+  
+  // If message is short (less than 10 characters)
+  if (messageText.length < 10) {
+    const shortResponses = [
+      "Hey, don't leave me hanging! Tell me more... 😉",
+      "Oh come on, I need more details than that! 💕 What else?",
+      "I'm intrigued... care to elaborate? ✨",
+      "Hmm, mysterious! I like it, but I want to hear more from you 😊"
+    ];
+    return shortResponses[Math.floor(Math.random() * shortResponses.length)];
+  }
+  
+  // Default conversation extenders
+  const defaultResponses = [
+    "That's really interesting! I've been thinking about something similar lately. What made you bring that up? 😊",
+    "I totally get what you mean! It's been on my mind too. So what else has been happening with you? ✨",
+    "Oh I can definitely relate to that! Actually, it reminds me of... wait, I'm curious - what else is new with you? 💕",
+    "No way! That's exactly what I needed to hear today. We should definitely talk more about this... what else is on your mind? 😉",
+    "I love the way you think! That's such a refreshing perspective. Tell me more about what inspires you? 🔥"
+  ];
+  
+  return defaultResponses[Math.floor(Math.random() * defaultResponses.length)];
 }
 
-// Humanize the AI response
+// Humanize the response
 function humanizeResponse(response, userProfile) {
   console.log(`Humanizing response: ${response}`);
   let humanized = response;
@@ -336,13 +314,13 @@ function humanizeResponse(response, userProfile) {
   }
   
   // Add common phrases occasionally
-  if (Math.random() < 0.15 && personalDetails.commonPhrases.length > 0) {
+  if (Math.random() < 0.25 && personalDetails.commonPhrases.length > 0) {
     const phrase = personalDetails.commonPhrases[
       Math.floor(Math.random() * personalDetails.commonPhrases.length)
     ];
     
     if (Math.random() < 0.5) {
-      humanized = `${phrase} ${humanized}`;
+      humanized = `${phrase}, ${humanized}`;
     } else {
       humanized = `${humanized} ${phrase}`;
     }
@@ -362,7 +340,6 @@ function humanizeResponse(response, userProfile) {
 // Calculate typing delay based on message length
 function calculateTypingDelay(message) {
   // Average typing speed is about 40 words per minute
-  // So that's about 0.67 words per second or 1.5 seconds per word
   const wordCount = message.split(' ').length;
   const baseDelay = 1000; // Base delay in milliseconds
   const typingTime = wordCount * 500; // 0.5 seconds per word
@@ -378,6 +355,13 @@ function calculateTypingDelay(message) {
 async function sendInstagramMessage(recipientId, message) {
   try {
     console.log(`Sending message to ${recipientId}: ${message}`);
+    
+    // Check if we have a valid access token
+    if (!process.env.INSTAGRAM_ACCESS_TOKEN) {
+      throw new Error('Missing Instagram access token');
+    }
+    
+    // Send message to Instagram
     const response = await axios.post(
       `${INSTAGRAM_BASE_URL}/me/messages`,
       {
@@ -391,14 +375,31 @@ async function sendInstagramMessage(recipientId, message) {
         }
       }
     );
+    
     console.log(`Message sent successfully to ${recipientId}`, response.data);
+    return response.data;
   } catch (error) {
     console.error('Error sending message:', error.message);
+    
     if (error.response) {
       console.error('Error response:', error.response.data);
+      
+      // Check if token is expired or invalid
+      if (error.response.data?.error?.code === 190) {
+        console.error('Access token is invalid or expired. Please update your INSTAGRAM_ACCESS_TOKEN.');
+      }
     }
+    
+    // Rethrow the error to be handled by the caller
+    throw error;
   }
 }
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
 
 // Test route to verify server is running
 app.get('/', (req, res) => {
@@ -410,41 +411,50 @@ app.get('/health', (req, res) => {
   res.status(200).send('OK');
 });
 
-// Debug endpoint to test the Hugging Face API
-app.get('/test-ai', async (req, res) => {
+// Debug endpoint to manually test responses
+app.post('/test-response', (req, res) => {
   try {
-    const response = await hf.textGeneration({
-      model: 'mistralai/Mistral-7B-Instruct-v0.2',
-      inputs: 'Hello, how are you?',
-      parameters: {
-        max_new_tokens: 50,
-        temperature: 0.7
-      }
+    const { message } = req.body;
+    if (!message) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+    
+    const mockUserProfile = {
+      id: 'test-user',
+      name: 'Test User',
+      conversationStyle: 'casual',
+      relationshipLevel: 'acquaintance',
+      conversationHistory: [],
+      responseCount: Math.floor(Math.random() * 5)
+    };
+    
+    const response = generateBackupResponse(message, mockUserProfile);
+    const humanizedResponse = humanizeResponse(response, mockUserProfile);
+    
+    res.json({ 
+      originalMessage: message,
+      response: humanizedResponse
     });
-    res.json({ success: true, response: response.generated_text });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Debug endpoint to test Instagram API connection
-app.get('/test-instagram', async (req, res) => {
+// Manual message send endpoint for testing
+app.post('/send-test-message', async (req, res) => {
   try {
-    const response = await axios.get(
-      `${INSTAGRAM_BASE_URL}/me`,
-      {
-        params: {
-          fields: 'id,username',
-          access_token: process.env.INSTAGRAM_ACCESS_TOKEN
-        }
-      }
-    );
-    res.json({ success: true, data: response.data });
+    const { userId, message } = req.body;
+    if (!userId || !message) {
+      return res.status(400).json({ error: 'Both userId and message are required' });
+    }
+    
+    const result = await sendInstagramMessage(userId, message);
+    res.json({ success: true, result });
   } catch (error) {
     res.status(500).json({ 
       success: false, 
       error: error.message,
-      response: error.response ? error.response.data : null
+      details: error.response?.data || 'No additional details'
     });
   }
 });
